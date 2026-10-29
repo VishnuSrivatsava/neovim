@@ -9,6 +9,9 @@ local t = require('test.testutil')
 local describe, it, before_each = t.describe, t.it, t.before_each
 local feed, insert = n.feed, n.insert
 local clear, feed_command, expect = n.clear, n.feed_command, n.expect
+local eq = t.eq
+local command = n.command
+local fn = n.fn
 
 -- Runs the test protocol with the given 'regexpengine' setting. In the old test
 -- suite the test protocol was duplicated in test44 and test99, the only
@@ -140,5 +143,59 @@ describe('multi-byte regexp search with magic settings', function()
   it('is working with regexpengine=2', function()
     -- The old test99.
     run_test_with_regexpengine(2)
+  end)
+
+  it('matches literal followed by composing char with ignorecase', function()
+    -- 'a\%C' matches "a" followed by a composing character. With
+    -- 'ignorecase', the backtracking engine used to fail the match because
+    -- cstrncmp() stepped over the composing character instead of leaving
+    -- it to the \%C atom. See issue #42574.
+    insert('ca\u{0300}t')
+    -- searchpos() moves the cursor, so reset it before every search to keep
+    -- the assertions independent of each other
+    local function sp(pat)
+      command('normal! gg0')
+      return fn.searchpos(pat)
+    end
+    for _, re in ipairs({ 0, 1, 2 }) do
+      for _, ic in ipairs({ '', 'ignorecase' }) do
+        command(('set regexpengine=%d %s'):format(re, ic == 'ignorecase' and 'ignorecase' or 'noignorecase'))
+        eq({ 1, 2 }, sp('a\\%C'), ('re=%d %s'):format(re, ic))
+        eq({ 1, 2 }, sp('\\ca\\%C'), ('re=%d %s'):format(re, ic))
+        eq({ 1, 1 }, sp('ca\\%Ct'), ('re=%d %s'):format(re, ic))
+        eq({ 1, 2 }, sp('[a]\\%C'), ('re=%d %s'):format(re, ic))
+        eq({ 1, 2 }, sp('a\\Z'), ('re=%d %s'):format(re, ic))
+        -- a pattern that includes the composing character itself
+        eq({ 1, 1 }, sp('ca\u{0300}'), ('re=%d %s'):format(re, ic))
+        -- the compose-skip atom inside a capture group
+        eq({ 1, 2 }, sp('\\(a\\%C\\)'), ('re=%d %s'):format(re, ic))
+        -- case-folded pattern char against input base char + composing;
+        -- without 'ignorecase' the case difference must reject the match
+        local expected_folded = ic == 'ignorecase' and { 1, 2 } or { 0, 0 }
+        eq(expected_folded, sp('A\\%C'), ('re=%d %s'):format(re, ic))
+        -- without \\%C a literal does not match a character followed by
+        -- a composing character (the default reject is preserved)
+        eq({ 0, 0 }, sp('a'), ('re=%d %s'):format(re, ic))
+      end
+    end
+  end)
+
+  it('matches with multiple composing characters', function()
+    local function sp(pat)
+      command('normal! gg0')
+      return fn.searchpos(pat)
+    end
+    insert('ca\u{0300}\u{0301}t')
+    for _, re in ipairs({ 0, 1, 2 }) do
+      for _, ic in ipairs({ '', 'ignorecase' }) do
+        command(('set regexpengine=%d %s'):format(re, ic == 'ignorecase' and 'ignorecase' or 'noignorecase'))
+        -- the compose-skip atom skips all trailing composing characters
+        eq({ 1, 2 }, sp('a\\%C'), ('re=%d %s'):format(re, ic))
+        -- a pattern with one literal composing character and the atom
+        eq({ 1, 2 }, sp('a\u{0300}\\%C'), ('re=%d %s'):format(re, ic))
+        -- a pattern covering every character matches the whole line
+        eq({ 1, 1 }, sp('ca\u{0300}\u{0301}t'), ('re=%d %s'):format(re, ic))
+      end
+    end
   end)
 end)
